@@ -36,7 +36,7 @@ const int JOY_HIGH = 760;
 LiquidCrystal_I2C lcd(0x27, 20, 4);
 DHT dht(DHTPIN, DHTTYPE);
 SoftwareSerial pmSerial(PM25_RX_PIN, PM25_TX_PIN);
-Adafruit_PM25AQI aqi;
+Adafruit_PM25AQI pm25;
 
 int icr = 639; // Timer1 TOP for ~25 kHz
 int fanDuty = 10;
@@ -266,8 +266,16 @@ void readSensorsTask(unsigned long now) {
       sensor.dhtValid = true;
     }
 
-    if (pmReady && pmSerial.available() >= 32) {
-      sensor.pmValid = aqi.read(&sensor.pm);
+    PM25_AQI_Data data;
+    if (pmReady && pm25.read(&data)) {
+      sensor.pm = data;
+      sensor.pmValid = true;
+      Serial.print(F("PM1.0: "));
+      Serial.print(sensor.pm.pm10_standard);
+      Serial.print(F("  PM2.5: "));
+      Serial.print(sensor.pm.pm25_standard);
+      Serial.print(F("  PM10: "));
+      Serial.println(sensor.pm.pm100_standard);
     } else {
       sensor.pmValid = false;
     }
@@ -526,29 +534,12 @@ void renderPmPage() {
   lcd.print(sensor.pm.pm25_standard);
   lcd.print(" M10:");
   lcd.print(sensor.pm.pm100_standard);
-  lcd.print(" ");
+  lcd.print("   ");
 
   lcd.setCursor(0, 2);
-  lcd.print("C03:");
-  lcd.print(sensor.pm.particles_03um);
-  lcd.print(" C05:");
-  lcd.print(sensor.pm.particles_05um);
-  lcd.print(" ");
-
+  lcd.print("Only PM1 PM2.5 PM10  ");
   lcd.setCursor(0, 3);
-  if ((clockData.ss & 1) == 0) {
-    lcd.print("C1:");
-    lcd.print(sensor.pm.particles_10um);
-    lcd.print(" C2.5:");
-    lcd.print(sensor.pm.particles_25um);
-    lcd.print("  ");
-  } else {
-    lcd.print("C5:");
-    lcd.print(sensor.pm.particles_50um);
-    lcd.print(" C10:");
-    lcd.print(sensor.pm.particles_100um);
-    lcd.print("  ");
-  }
+  lcd.print("Demo UART read mode  ");
 }
 
 void renderTempPage() {
@@ -681,8 +672,14 @@ void setup() {
 
   dht.begin();
   pmSerial.begin(9600);
-  delay(1500);
-  pmReady = aqi.begin_UART(&pmSerial);
+  delay(1000);
+  if (!pm25.begin_UART(&pmSerial)) {
+    pmReady = false;
+    Serial.println(F("PMS5003 not found!"));
+  } else {
+    pmReady = true;
+    Serial.println(F("PMS5003 ready"));
+  }
 
   setupFan25kHz();
   setFanDuty(cfg.fanDutyByLevel[0]);
@@ -694,7 +691,7 @@ void setup() {
   lastUserInput = lastClockTick;
   lcd.setCursor(0, 2); lcd.print(pmReady ? "PMS5003 online       " : "PMS5003 unavailable  ");
   lcd.setCursor(0, 3); lcd.print("Press joy btn for UI ");
-  delay(3000);
+  delay(1200);
   lcd.clear();
 }
 

@@ -1,7 +1,6 @@
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
 #include <DHT.h>
-#include <SoftwareSerial.h>
 #include "Adafruit_PM25AQI.h"
 
 // ---- Pin mapping ----
@@ -20,6 +19,22 @@
 #define PM25_TX_PIN 3
 #define FAN_PIN 9
 
+// PM serial compatibility:
+// - Prefer hardware Serial1 (Uno R4 / boards that expose it)
+// - Fallback to SoftwareSerial when available
+// - If neither exists, compile with PM disabled
+#if defined(ARDUINO_ARCH_RENESAS) || defined(HAVE_HWSERIAL1)
+#define PM_HAS_SERIAL 1
+#define PM_USE_HARDWARE_SERIAL 1
+#elif __has_include(<SoftwareSerial.h>)
+#include <SoftwareSerial.h>
+#define PM_HAS_SERIAL 1
+#define PM_USE_HARDWARE_SERIAL 0
+#else
+#define PM_HAS_SERIAL 0
+#define PM_USE_HARDWARE_SERIAL 0
+#endif
+
 // ---- Timing ----
 const unsigned long FAST_SENSOR_MS = 120;
 const unsigned long SLOW_SENSOR_MS = 1200;
@@ -35,10 +50,13 @@ const int JOY_HIGH = 760;
 
 LiquidCrystal_I2C lcd(0x27, 20, 4);
 DHT dht(DHTPIN, DHTTYPE);
-SoftwareSerial pmSerial(PM25_RX_PIN, PM25_TX_PIN);
 Adafruit_PM25AQI aqi;
+#if PM_HAS_SERIAL && PM_USE_HARDWARE_SERIAL
+HardwareSerial& pmSerial = Serial1;
+#elif PM_HAS_SERIAL
+SoftwareSerial pmSerial(PM25_RX_PIN, PM25_TX_PIN);
+#endif
 
-int icr = 639; // Timer1 TOP for ~25 kHz
 int fanDuty = 10;
 
 enum AirLevel { AIR_GREEN = 0, AIR_YELLOW = 1, AIR_ORANGE = 2, AIR_RED = 3 };
@@ -133,21 +151,18 @@ void setColor(uint8_t r, uint8_t g, uint8_t b) {
   analogWrite(BLUE, b);
 }
 
-void setupFan25kHz() {
+// Uno Q/R4 is non-AVR, so avoid AVR Timer1 registers.
+// Use portable PWM setup that works across Uno families.
+void setupFanPwm() {
   pinMode(FAN_PIN, OUTPUT);
-  TCCR1A = 0xA2;
-  TCCR1B = 0x19;
-  TCNT1H = 0x00;
-  TCNT1L = 0x00;
-  ICR1H = icr >> 8;
-  ICR1L = icr & 0x00ff;
 }
 
 void setFanDuty(int duty) {
   if (duty < 0) duty = 0;
   if (duty > 100) duty = 100;
   fanDuty = duty;
-  OCR1A = (uint16_t)(((long)icr * fanDuty) / 100L);
+  uint8_t pwmValue = (uint8_t)map(fanDuty, 0, 100, 0, 255);
+  analogWrite(FAN_PIN, pwmValue);
 }
 
 uint16_t estimatePpmFromMq(int raw) {
@@ -266,7 +281,7 @@ void readSensorsTask(unsigned long now) {
       sensor.dhtValid = true;
     }
 
-    if (pmReady && pmSerial.available() >= 32) {
+    if (PM_HAS_SERIAL && pmReady && pmSerial.available() >= 32) {
       sensor.pmValid = aqi.read(&sensor.pm);
     } else {
       sensor.pmValid = false;
@@ -680,11 +695,15 @@ void setup() {
   lcd.setCursor(0, 1); lcd.print("Sensor startup...    ");
 
   dht.begin();
-  pmSerial.begin(9600);
-  delay(1500);
-  pmReady = aqi.begin_UART(&pmSerial);
+  if (PM_HAS_SERIAL) {
+    pmSerial.begin(9600);
+    delay(1500);
+    pmReady = aqi.begin_UART(&pmSerial);
+  } else {
+    pmReady = false;
+  }
 
-  setupFan25kHz();
+  setupFanPwm();
   setFanDuty(cfg.fanDutyByLevel[0]);
 
   sensor.flameRaw = analogRead(FLAME_PIN);
@@ -694,7 +713,7 @@ void setup() {
   lastUserInput = lastClockTick;
   lcd.setCursor(0, 2); lcd.print(pmReady ? "PMS5003 online       " : "PMS5003 unavailable  ");
   lcd.setCursor(0, 3); lcd.print("Press joy btn for UI ");
-  delay(3000);
+  delay(1200);
   lcd.clear();
 }
 

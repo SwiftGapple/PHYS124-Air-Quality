@@ -1,8 +1,7 @@
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
 #include <DHT.h>
-#include <SoftwareSerial.h>
-#include "Adafruit_PM25AQI.h"
+#include <stdarg.h>
 
 // ---- Pin mapping ----
 #define JOY_X_PIN A0
@@ -16,8 +15,6 @@
 #define RED 6
 #define GREEN 10
 #define BLUE 11
-#define PM25_RX_PIN 2
-#define PM25_TX_PIN 3
 #define FAN_PIN 9
 
 // ---- Timing ----
@@ -35,16 +32,13 @@ const int JOY_HIGH = 760;
 
 LiquidCrystal_I2C lcd(0x27, 20, 4);
 DHT dht(DHTPIN, DHTTYPE);
-SoftwareSerial pmSerial(PM25_RX_PIN, PM25_TX_PIN);
-Adafruit_PM25AQI aqi;
 
 int icr = 639; // Timer1 TOP for ~25 kHz
 int fanDuty = 10;
 
 enum AirLevel { AIR_GREEN = 0, AIR_YELLOW = 1, AIR_ORANGE = 2, AIR_RED = 3 };
 enum SystemState { IDLE_CLOCK = 0, MENU = 1, ALERT_ORANGE = 2, ALERT_RED = 3, FIRE_ALERT = 4 };
-enum UiPage { PAGE_GAS = 0, PAGE_PM = 1, PAGE_TEMP = 2, PAGE_FLAME = 3, PAGE_FAN = 4, PAGE_CLOCK = 5, PAGE_COUNT = 6 };
-enum OutlierSource { SRC_GAS = 0, SRC_PM25 = 1, SRC_PM10 = 2 };
+enum UiPage { PAGE_GAS = 0, PAGE_TEMP = 1, PAGE_FLAME = 2, PAGE_FAN = 3, PAGE_CLOCK = 4, PAGE_COUNT = 5 };
 
 struct SensorData {
   int mqRaw;
@@ -55,20 +49,12 @@ struct SensorData {
   float tempC;
   float humidity;
   bool dhtValid;
-  PM25_AQI_Data pm;
-  bool pmValid;
 };
 
 struct ThresholdConfig {
   int mqYellow;
   int mqOrange;
   int mqRed;
-  uint16_t pm25Yellow;
-  uint16_t pm25Orange;
-  uint16_t pm25Red;
-  uint16_t pm10Yellow;
-  uint16_t pm10Orange;
-  uint16_t pm10Red;
   int flameTrigger;
   int flameHysteresis;
   uint8_t fanDutyByLevel[4]; // green, yellow, orange, red
@@ -82,21 +68,17 @@ struct ClockData {
   uint8_t field; // 0:hh, 1:mm, 2:ss
 };
 
-SensorData sensor = {0, 10, 0, 0, false, NAN, NAN, false, {}, false};
+SensorData sensor = {0, 10, 0, 0, false, NAN, NAN, false};
 ThresholdConfig cfg = {
   350, 550, 750, // MQ thresholds
-  12, 35, 55,    // PM2.5 thresholds
-  54, 154, 254,  // PM10 thresholds
   380, 40,       // Flame trigger + hysteresis
   {20, 35, 65, 90}
 };
 ClockData clockData = {12, 0, 0, false, 0};
 
-bool pmReady = false;
 SystemState systemState = IDLE_CLOCK;
 AirLevel airLevel = AIR_GREEN;
 UiPage uiPage = PAGE_GAS;
-OutlierSource outlierSrc = SRC_GAS;
 int outlierValue = 0;
 bool menuActive = false;
 
@@ -126,6 +108,34 @@ unsigned long lastTraceInput = 0;
 unsigned long lastTraceState = 0;
 unsigned long lastTraceOutput = 0;
 unsigned long lastTraceUi = 0;
+char lcdCache[4][21];
+
+void formatLcdLine(char* out, const char* fmt, ...) {
+  char buf[48];
+  va_list args;
+  va_start(args, fmt);
+  vsnprintf(buf, sizeof(buf), fmt, args);
+  va_end(args);
+
+  uint8_t i = 0;
+  for (; i < 20 && buf[i] != '\0'; i++) out[i] = buf[i];
+  for (; i < 20; i++) out[i] = ' ';
+  out[20] = '\0';
+}
+
+void writeLineIfChanged(uint8_t row, const char* line) {
+  if (strcmp(lcdCache[row], line) == 0) return;
+  lcd.setCursor(0, row);
+  lcd.print(line);
+  strcpy(lcdCache[row], line);
+}
+
+void renderLines(const char* l0, const char* l1, const char* l2, const char* l3) {
+  writeLineIfChanged(0, l0);
+  writeLineIfChanged(1, l1);
+  writeLineIfChanged(2, l2);
+  writeLineIfChanged(3, l3);
+}
 
 void setColor(uint8_t r, uint8_t g, uint8_t b) {
   analogWrite(RED, r);
@@ -266,11 +276,6 @@ void readSensorsTask(unsigned long now) {
       sensor.dhtValid = true;
     }
 
-    if (pmReady && pmSerial.available() >= 32) {
-      sensor.pmValid = aqi.read(&sensor.pm);
-    } else {
-      sensor.pmValid = false;
-    }
   }
 }
 
@@ -357,28 +362,8 @@ void updateStateTask(unsigned long now) {
   if (now - lastStateTick < STATE_MS) return;
   lastStateTick = now;
 
-  AirLevel mqLevel = levelFromThresholds(sensor.mqRaw, cfg.mqYellow, cfg.mqOrange, cfg.mqRed);
-  AirLevel pm25Level = AIR_GREEN;
-  AirLevel pm10Level = AIR_GREEN;
-
-  if (sensor.pmValid) {
-    pm25Level = levelFromThresholds((int)sensor.pm.pm25_standard, cfg.pm25Yellow, cfg.pm25Orange, cfg.pm25Red);
-    pm10Level = levelFromThresholds((int)sensor.pm.pm100_standard, cfg.pm10Yellow, cfg.pm10Orange, cfg.pm10Red);
-  }
-
-  airLevel = mqLevel;
-  outlierSrc = SRC_GAS;
+  airLevel = levelFromThresholds(sensor.mqRaw, cfg.mqYellow, cfg.mqOrange, cfg.mqRed);
   outlierValue = sensor.mqRaw;
-  if ((int)pm25Level > (int)airLevel) {
-    airLevel = pm25Level;
-    outlierSrc = SRC_PM25;
-    outlierValue = sensor.pm.pm25_standard;
-  }
-  if ((int)pm10Level > (int)airLevel) {
-    airLevel = pm10Level;
-    outlierSrc = SRC_PM10;
-    outlierValue = sensor.pm.pm100_standard;
-  }
 
   if (sensor.flameDetected) {
     systemState = FIRE_ALERT;
@@ -472,164 +457,103 @@ void updateOutputTask(unsigned long now) {
 }
 
 void renderIdleClock() {
-  lcd.setCursor(0, 0);
-  lcd.print("Clock ");
-  if (clockData.hh < 10) lcd.print('0');
-  lcd.print(clockData.hh);
-  lcd.print(':');
-  if (clockData.mm < 10) lcd.print('0');
-  lcd.print(clockData.mm);
-  lcd.print(':');
-  if (clockData.ss < 10) lcd.print('0');
-  lcd.print(clockData.ss);
-  lcd.print("   ");
-
-  lcd.setCursor(0, 1);
-  lcd.print("Air:");
-  lcd.print(levelName(airLevel));
-  lcd.print(" Fan:");
-  lcd.print(fanDuty);
-  lcd.print("%   ");
-
-  lcd.setCursor(0, 2);
-  if (outlierSrc == SRC_GAS) lcd.print("Outlier:Gas ");
-  if (outlierSrc == SRC_PM25) lcd.print("Outlier:PM2.5");
-  if (outlierSrc == SRC_PM10) lcd.print("Outlier:PM10 ");
-  lcd.print(" ");
-  lcd.print(outlierValue);
-  lcd.print("   ");
-
-  lcd.setCursor(0, 3);
-  lcd.print("Btn=Menu AutoAlertOn ");
+  char l0[21], l1[21], l2[21], l3[21];
+  formatLcdLine(l0, "Clock %02u:%02u:%02u", clockData.hh, clockData.mm, clockData.ss);
+  formatLcdLine(l1, "Air:%s Fan:%d%%", levelName(airLevel), fanDuty);
+  formatLcdLine(l2, "Outlier:Gas %d", outlierValue);
+  formatLcdLine(l3, "Btn=Menu AutoAlertOn");
+  renderLines(l0, l1, l2, l3);
 }
 
 void renderGasPage() {
-  lcd.setCursor(0, 0); lcd.print("Gas Sensor MQ-135    ");
-  lcd.setCursor(0, 1); lcd.print("Raw ADC: "); lcd.print(sensor.mqRaw); lcd.print("       ");
-  lcd.setCursor(0, 2); lcd.print("Est ppm: "); lcd.print(sensor.gasPpmEst); lcd.print(" 10-1000 ");
-  lcd.setCursor(0, 3); lcd.print("Lvl:"); lcd.print(levelName(airLevel)); lcd.print(" Btn=Exit ");
-}
-
-void renderPmPage() {
-  lcd.setCursor(0, 0); lcd.print("PM Sensor PMS5003    ");
-  if (!sensor.pmValid) {
-    lcd.setCursor(0, 1); lcd.print("PM read unavailable  ");
-    lcd.setCursor(0, 2); lcd.print("Check D2/D3 wiring   ");
-    lcd.setCursor(0, 3); lcd.print("Y nav Btn=Exit       ");
-    return;
-  }
-
-  lcd.setCursor(0, 1);
-  lcd.print("M1:");
-  lcd.print(sensor.pm.pm10_standard);
-  lcd.print(" M2:");
-  lcd.print(sensor.pm.pm25_standard);
-  lcd.print(" M10:");
-  lcd.print(sensor.pm.pm100_standard);
-  lcd.print(" ");
-
-  lcd.setCursor(0, 2);
-  lcd.print("C03:");
-  lcd.print(sensor.pm.particles_03um);
-  lcd.print(" C05:");
-  lcd.print(sensor.pm.particles_05um);
-  lcd.print(" ");
-
-  lcd.setCursor(0, 3);
-  if ((clockData.ss & 1) == 0) {
-    lcd.print("C1:");
-    lcd.print(sensor.pm.particles_10um);
-    lcd.print(" C2.5:");
-    lcd.print(sensor.pm.particles_25um);
-    lcd.print("  ");
-  } else {
-    lcd.print("C5:");
-    lcd.print(sensor.pm.particles_50um);
-    lcd.print(" C10:");
-    lcd.print(sensor.pm.particles_100um);
-    lcd.print("  ");
-  }
+  char l0[21], l1[21], l2[21], l3[21];
+  formatLcdLine(l0, "Gas Sensor MQ-135");
+  formatLcdLine(l1, "Raw ADC: %d", sensor.mqRaw);
+  formatLcdLine(l2, "Est ppm: %u 10-1000", sensor.gasPpmEst);
+  formatLcdLine(l3, "Lvl:%s Btn=Exit", levelName(airLevel));
+  renderLines(l0, l1, l2, l3);
 }
 
 void renderTempPage() {
-  lcd.setCursor(0, 0); lcd.print("Temperature/Humidity ");
+  char l0[21], l1[21], l2[21], l3[21];
+  formatLcdLine(l0, "Temperature/Humidity");
   if (!sensor.dhtValid) {
-    lcd.setCursor(0, 1); lcd.print("DHT22 read error     ");
-    lcd.setCursor(0, 2); lcd.print("Check D4/5V/GND      ");
-    lcd.setCursor(0, 3); lcd.print("Y nav Btn=Exit       ");
+    formatLcdLine(l1, "DHT22 read error");
+    formatLcdLine(l2, "Check D4/5V/GND");
+    formatLcdLine(l3, "Y nav Btn=Exit");
+    renderLines(l0, l1, l2, l3);
     return;
   }
-  float tempF = sensor.tempC * 9.0 / 5.0 + 32.0;
-  lcd.setCursor(0, 1); lcd.print("T:"); lcd.print(sensor.tempC, 1); lcd.print("C "); lcd.print(tempF, 1); lcd.print("F     ");
-  lcd.setCursor(0, 2); lcd.print("RH:"); lcd.print(sensor.humidity, 1); lcd.print("%           ");
-  lcd.setCursor(0, 3); lcd.print("Y nav Btn=Exit       ");
+
+  // Avoid printf float formatting on Arduino cores (often disabled),
+  // so line text changes correctly and cache updates work.
+  int tempC10 = (int)(sensor.tempC * 10.0f + (sensor.tempC >= 0 ? 0.5f : -0.5f));
+  int tempF10 = (tempC10 * 9) / 5 + 320;
+  int hum10 = (int)(sensor.humidity * 10.0f + (sensor.humidity >= 0 ? 0.5f : -0.5f));
+  int tempCAbs = tempC10 < 0 ? -tempC10 : tempC10;
+  int tempFAbs = tempF10 < 0 ? -tempF10 : tempF10;
+  int humAbs = hum10 < 0 ? -hum10 : hum10;
+
+  formatLcdLine(l1, "T:%s%d.%dC %s%d.%dF",
+                tempC10 < 0 ? "-" : "",
+                tempCAbs / 10, tempCAbs % 10,
+                tempF10 < 0 ? "-" : "",
+                tempFAbs / 10, tempFAbs % 10);
+  formatLcdLine(l2, "RH:%s%d.%d%%",
+                hum10 < 0 ? "-" : "",
+                humAbs / 10, humAbs % 10);
+  formatLcdLine(l3, "Y nav Btn=Exit");
+  renderLines(l0, l1, l2, l3);
 }
 
 void renderFlamePage() {
-  lcd.setCursor(0, 0); lcd.print("Flame Sensor KY-026  ");
-  lcd.setCursor(0, 1); lcd.print("Raw:"); lcd.print(sensor.flameRaw); lcd.print(" Avg:"); lcd.print(sensor.flameAvg); lcd.print("   ");
-  lcd.setCursor(0, 2); lcd.print("Trig:"); lcd.print(cfg.flameTrigger); lcd.print(" Hys:"); lcd.print(cfg.flameHysteresis); lcd.print("  ");
-  lcd.setCursor(0, 3); lcd.print(sensor.flameDetected ? "FIRE " : "SAFE "); lcd.print("Read-only Btn=Exit ");
+  char l0[21], l1[21], l2[21], l3[21];
+  formatLcdLine(l0, "Flame Sensor KY-026");
+  formatLcdLine(l1, "Raw:%d Avg:%d", sensor.flameRaw, sensor.flameAvg);
+  formatLcdLine(l2, "Trig:%d Hys:%d", cfg.flameTrigger, cfg.flameHysteresis);
+  formatLcdLine(l3, "%s Read-only Btn=Exit", sensor.flameDetected ? "FIRE" : "SAFE");
+  renderLines(l0, l1, l2, l3);
 }
 
 void renderFanPage() {
-  lcd.setCursor(0, 0); lcd.print("Fan Config by Level  ");
-  lcd.setCursor(0, 1);
-  lcd.print("G:");
-  lcd.print((int)cfg.fanDutyByLevel[0]);
-  lcd.print("% Y:");
-  lcd.print((int)cfg.fanDutyByLevel[1]);
-  lcd.print("% O:");
-  lcd.print((int)cfg.fanDutyByLevel[2]);
-  lcd.print("%");
-  lcd.setCursor(0, 2); lcd.print("R:"); lcd.print((int)cfg.fanDutyByLevel[3]); lcd.print("% Run:"); lcd.print(fanDuty); lcd.print("%  ");
-  lcd.setCursor(0, 3); lcd.print("Auto control (locked)");
+  char l0[21], l1[21], l2[21], l3[21];
+  formatLcdLine(l0, "Fan Config by Level");
+  formatLcdLine(l1, "G:%d%% Y:%d%% O:%d%%", (int)cfg.fanDutyByLevel[0], (int)cfg.fanDutyByLevel[1], (int)cfg.fanDutyByLevel[2]);
+  formatLcdLine(l2, "R:%d%% Run:%d%%", (int)cfg.fanDutyByLevel[3], fanDuty);
+  formatLcdLine(l3, "Auto control (locked)");
+  renderLines(l0, l1, l2, l3);
 }
 
 void renderClockPage() {
-  lcd.setCursor(0, 0); lcd.print("Clock Setup          ");
-  lcd.setCursor(0, 1);
-  lcd.print("Time ");
-  if (clockData.hh < 10) lcd.print('0');
-  lcd.print(clockData.hh);
-  lcd.print(':');
-  if (clockData.mm < 10) lcd.print('0');
-  lcd.print(clockData.mm);
-  lcd.print(':');
-  if (clockData.ss < 10) lcd.print('0');
-  lcd.print(clockData.ss);
-  lcd.print("     ");
-
-  lcd.setCursor(0, 2);
+  char l0[21], l1[21], l2[21], l3[21];
+  formatLcdLine(l0, "Clock Setup");
+  formatLcdLine(l1, "Time %02u:%02u:%02u", clockData.hh, clockData.mm, clockData.ss);
   if (!clockData.editMode) {
-    lcd.print("Btn=Edit  Y nav      ");
+    formatLcdLine(l2, "Btn=Edit  Y nav");
   } else {
-    lcd.print("L/R adjust ");
-    if (clockData.field == 0) lcd.print("HH ");
-    if (clockData.field == 1) lcd.print("MM ");
-    if (clockData.field == 2) lcd.print("SS ");
-    lcd.print("     ");
+    const char* field = (clockData.field == 0) ? "HH" : (clockData.field == 1) ? "MM" : "SS";
+    formatLcdLine(l2, "L/R adjust %s", field);
   }
-  lcd.setCursor(0, 3); lcd.print("Btn step/save+exit   ");
+  formatLcdLine(l3, "Btn step/save+exit");
+  renderLines(l0, l1, l2, l3);
 }
 
 void renderAlertScreen() {
-  lcd.setCursor(0, 0); lcd.print("Air Warning Active   ");
-  lcd.setCursor(0, 1); lcd.print("Level: "); lcd.print(levelName(airLevel)); lcd.print("          ");
-  lcd.setCursor(0, 2); lcd.print("Outlier: ");
-  if (outlierSrc == SRC_GAS) lcd.print("Gas ");
-  if (outlierSrc == SRC_PM25) lcd.print("PM2.5 ");
-  if (outlierSrc == SRC_PM10) lcd.print("PM10 ");
-  lcd.print(outlierValue);
-  lcd.print("   ");
-  lcd.setCursor(0, 3); lcd.print("Auto fan+alarm BtnUI ");
+  char l0[21], l1[21], l2[21], l3[21];
+  formatLcdLine(l0, "Air Warning Active");
+  formatLcdLine(l1, "Level: %s", levelName(airLevel));
+  formatLcdLine(l2, "Outlier: Gas %d", outlierValue);
+  formatLcdLine(l3, "Auto fan+alarm BtnUI");
+  renderLines(l0, l1, l2, l3);
 }
 
 void renderFireScreen() {
-  lcd.setCursor(0, 0); lcd.print("!!! FIRE ALERT !!!   ");
-  lcd.setCursor(0, 1); lcd.print("Flame avg: "); lcd.print(sensor.flameAvg); lcd.print("       ");
-  lcd.setCursor(0, 2); lcd.print("Fan forced to 100%   ");
-  lcd.setCursor(0, 3); lcd.print("Btn=Menu             ");
+  char l0[21], l1[21], l2[21], l3[21];
+  formatLcdLine(l0, "!!! FIRE ALERT !!!");
+  formatLcdLine(l1, "Flame avg: %d", sensor.flameAvg);
+  formatLcdLine(l2, "Fan forced to 100%%");
+  formatLcdLine(l3, "Btn=Menu");
+  renderLines(l0, l1, l2, l3);
 }
 
 void updateUiTask(unsigned long now) {
@@ -655,7 +579,6 @@ void updateUiTask(unsigned long now) {
   }
 
   if (uiPage == PAGE_GAS) renderGasPage();
-  if (uiPage == PAGE_PM) renderPmPage();
   if (uiPage == PAGE_TEMP) renderTempPage();
   if (uiPage == PAGE_FLAME) renderFlamePage();
   if (uiPage == PAGE_FAN) renderFanPage();
@@ -676,13 +599,12 @@ void setup() {
 
   lcd.init();
   lcd.backlight();
+  for (uint8_t i = 0; i < 4; i++) lcdCache[i][0] = '\0';
   lcd.setCursor(0, 0); lcd.print("PHYS124 Air Monitor  ");
   lcd.setCursor(0, 1); lcd.print("Sensor startup...    ");
 
   dht.begin();
-  pmSerial.begin(9600);
-  delay(1500);
-  pmReady = aqi.begin_UART(&pmSerial);
+  delay(500);
 
   setupFan25kHz();
   setFanDuty(cfg.fanDutyByLevel[0]);
@@ -692,7 +614,7 @@ void setup() {
 
   lastClockTick = millis();
   lastUserInput = lastClockTick;
-  lcd.setCursor(0, 2); lcd.print(pmReady ? "PMS5003 online       " : "PMS5003 unavailable  ");
+  lcd.setCursor(0, 2); lcd.print("PM sensor removed    ");
   lcd.setCursor(0, 3); lcd.print("Press joy btn for UI ");
   delay(3000);
   lcd.clear();
