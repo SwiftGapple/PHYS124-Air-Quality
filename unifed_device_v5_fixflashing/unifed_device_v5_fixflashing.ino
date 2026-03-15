@@ -24,7 +24,7 @@ const unsigned long STATE_MS = 160;
 const unsigned long OUTPUT_MS = 80;
 const unsigned long UI_MS = 220;
 const unsigned long JOY_REPEAT_MS = 220;
-const unsigned long MENU_TIMEOUT_MS = 15000;
+const unsigned long MENU_TIMEOUT_MS = 200000;
 
 const uint8_t FLAME_FILTER_N = 8;
 const int JOY_LOW = 260;
@@ -55,6 +55,9 @@ struct ThresholdConfig {
   int mqYellow;
   int mqOrange;
   int mqRed;
+  int flameYellow;
+  int flameOrange;
+  int flameRed;
   int flameTrigger;
   int flameHysteresis;
   uint8_t fanDutyByLevel[4]; // green, yellow, orange, red
@@ -70,8 +73,9 @@ struct ClockData {
 
 SensorData sensor = {0, 10, 0, 0, false, NAN, NAN, false};
 ThresholdConfig cfg = {
-  350, 550, 750, // MQ thresholds
-  380, 40,       // Flame trigger + hysteresis
+  120, 160, 200, // MQ thresholds tuned for 20..300 raw range
+  950, 900, 860, // Flame warning thresholds (lower value = stronger flame)
+  820, 30,       // Flame fire trigger + hysteresis
   {20, 35, 65, 90}
 };
 ClockData clockData = {12, 0, 0, false, 0};
@@ -161,7 +165,8 @@ void setFanDuty(int duty) {
 }
 
 uint16_t estimatePpmFromMq(int raw) {
-  long ppm = map(raw, 80, 900, 10, 1000);
+  // MQ sensitivity range tuned for this setup.
+  long ppm = map(raw, 20, 300, 10, 1000);
   if (ppm < 10) ppm = 10;
   if (ppm > 1000) ppm = 1000;
   return (uint16_t)ppm;
@@ -171,6 +176,13 @@ AirLevel levelFromThresholds(int value, int yellow, int orange, int red) {
   if (value >= red) return AIR_RED;
   if (value >= orange) return AIR_ORANGE;
   if (value >= yellow) return AIR_YELLOW;
+  return AIR_GREEN;
+}
+
+AirLevel levelFromLowerIsWorse(int value, int yellow, int orange, int red) {
+  if (value <= red) return AIR_RED;
+  if (value <= orange) return AIR_ORANGE;
+  if (value <= yellow) return AIR_YELLOW;
   return AIR_GREEN;
 }
 
@@ -362,8 +374,15 @@ void updateStateTask(unsigned long now) {
   if (now - lastStateTick < STATE_MS) return;
   lastStateTick = now;
 
-  airLevel = levelFromThresholds(sensor.mqRaw, cfg.mqYellow, cfg.mqOrange, cfg.mqRed);
+  AirLevel mqLevel = levelFromThresholds(sensor.mqRaw, cfg.mqYellow, cfg.mqOrange, cfg.mqRed);
+  AirLevel flameLevel = levelFromLowerIsWorse(sensor.flameAvg, cfg.flameYellow, cfg.flameOrange, cfg.flameRed);
+
+  airLevel = mqLevel;
   outlierValue = sensor.mqRaw;
+  if ((int)flameLevel > (int)airLevel) {
+    airLevel = flameLevel;
+    outlierValue = sensor.flameAvg;
+  }
 
   if (sensor.flameDetected) {
     systemState = FIRE_ALERT;
@@ -510,8 +529,8 @@ void renderFlamePage() {
   char l0[21], l1[21], l2[21], l3[21];
   formatLcdLine(l0, "Flame Sensor KY-026");
   formatLcdLine(l1, "Raw:%d Avg:%d", sensor.flameRaw, sensor.flameAvg);
-  formatLcdLine(l2, "Trig:%d Hys:%d", cfg.flameTrigger, cfg.flameHysteresis);
-  formatLcdLine(l3, "%s Read-only Btn=Exit", sensor.flameDetected ? "FIRE" : "SAFE");
+  formatLcdLine(l2, "Y:%d O:%d R:%d", cfg.flameYellow, cfg.flameOrange, cfg.flameRed);
+  formatLcdLine(l3, "%s FIRE@%d Btn=Exit", sensor.flameDetected ? "FIRE" : "SAFE", cfg.flameTrigger);
   renderLines(l0, l1, l2, l3);
 }
 
