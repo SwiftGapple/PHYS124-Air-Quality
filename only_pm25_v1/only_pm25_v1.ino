@@ -45,11 +45,7 @@ void loop() {
   
   if (! aqi.read(&data)) {
     Serial.println("Could not read from AQI");
-    lcd.setCursor(0, 0); lcd.print("PM read failed       ");
-    lcd.setCursor(0, 1); lcd.print("Retrying...          ");
-    lcd.setCursor(0, 2); lcd.print("                    ");
-    lcd.setCursor(0, 3); lcd.print("                    ");
-    
+    // Keep showing last successful values on LCD.
     delay(500);  // try again in a bit!
     return;
   }
@@ -83,9 +79,9 @@ void loop() {
 
   // LCD real-time PM display (standard concentration)
   lcd.setCursor(0, 0); lcd.print("PMS5003 Real-time    ");
-  lcd.setCursor(0, 1); lcd.print("PM1.0: "); lcd.print(data.pm10_standard); lcd.print("      ");
-  lcd.setCursor(0, 2); lcd.print("PM2.5: "); lcd.print(data.pm25_standard); lcd.print("      ");
-  lcd.setCursor(0, 3); lcd.print("PM10 : "); lcd.print(data.pm100_standard); lcd.print("      ");
+  lcd.setCursor(0, 1); lcd.print("PM1.0: "); lcd.print(data.pm10_standard); lcd.print(" ug/m3 ");
+  lcd.setCursor(0, 2); lcd.print("PM2.5: "); lcd.print(data.pm25_standard); lcd.print(" ug/m3 ");
+  lcd.setCursor(0, 3); lcd.print("PM10 : "); lcd.print(data.pm100_standard); lcd.print(" ug/m3 ");
 
-  delay(1000);
+  delay(2000);
 }
