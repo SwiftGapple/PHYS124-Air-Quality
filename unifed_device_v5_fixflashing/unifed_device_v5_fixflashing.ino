@@ -3,6 +3,11 @@
 #include <DHT.h>
 #include <stdarg.h>
 
+// Operating principle:
+// 1) Periodic tasks read sensors, process state, drive outputs, and update UI.
+// 2) Gas/flame levels map to warning states that control RGB LED, buzzer, and fan.
+// 3) LCD pages are joystick-driven, and cached line rendering avoids flicker.
+
 // ---- Pin mapping ----
 #define JOY_X_PIN A0
 #define JOY_Y_PIN A1
@@ -114,6 +119,7 @@ unsigned long lastTraceOutput = 0;
 unsigned long lastTraceUi = 0;
 char lcdCache[4][21];
 
+// Build a fixed-width 20-char LCD line from printf-style input.
 void formatLcdLine(char* out, const char* fmt, ...) {
   char buf[48];
   va_list args;
@@ -127,13 +133,15 @@ void formatLcdLine(char* out, const char* fmt, ...) {
   out[20] = '\0';
 }
 
+// Write a row only when changed, reducing I2C traffic and flicker.
 void writeLineIfChanged(uint8_t row, const char* line) {
-  if (strcmp(lcdCache[row], line) == 0) return;
+  if (strcmp(lcdCache[row], line) == 0) return; // Skip unchanged row.
   lcd.setCursor(0, row);
   lcd.print(line);
   strcpy(lcdCache[row], line);
 }
 
+// Render all four rows using line-level change detection.
 void renderLines(const char* l0, const char* l1, const char* l2, const char* l3) {
   writeLineIfChanged(0, l0);
   writeLineIfChanged(1, l1);
@@ -141,12 +149,14 @@ void renderLines(const char* l0, const char* l1, const char* l2, const char* l3)
   writeLineIfChanged(3, l3);
 }
 
+// Set RGB LED PWM outputs.
 void setColor(uint8_t r, uint8_t g, uint8_t b) {
   analogWrite(RED, r);
   analogWrite(GREEN, g);
   analogWrite(BLUE, b);
 }
 
+// Configure Timer1 for fan PWM generation.
 void setupFan25kHz() {
   pinMode(FAN_PIN, OUTPUT);
   TCCR1A = 0xA2;
@@ -157,6 +167,7 @@ void setupFan25kHz() {
   ICR1L = icr & 0x00ff;
 }
 
+// Apply fan duty percentage and update PWM compare value.
 void setFanDuty(int duty) {
   if (duty < 0) duty = 0;
   if (duty > 100) duty = 100;
@@ -164,6 +175,7 @@ void setFanDuty(int duty) {
   OCR1A = (uint16_t)(((long)icr * fanDuty) / 100L);
 }
 
+// Convert MQ raw value to display-only ppm estimate.
 uint16_t estimatePpmFromMq(int raw) {
   // MQ sensitivity range tuned for this setup.
   long ppm = map(raw, 20, 300, 10, 1000);
@@ -172,6 +184,7 @@ uint16_t estimatePpmFromMq(int raw) {
   return (uint16_t)ppm;
 }
 
+// Classify a "higher is worse" value into air levels.
 AirLevel levelFromThresholds(int value, int yellow, int orange, int red) {
   if (value >= red) return AIR_RED;
   if (value >= orange) return AIR_ORANGE;
@@ -179,6 +192,7 @@ AirLevel levelFromThresholds(int value, int yellow, int orange, int red) {
   return AIR_GREEN;
 }
 
+// Classify a "lower is worse" value into air levels.
 AirLevel levelFromLowerIsWorse(int value, int yellow, int orange, int red) {
   if (value <= red) return AIR_RED;
   if (value <= orange) return AIR_ORANGE;
@@ -186,6 +200,7 @@ AirLevel levelFromLowerIsWorse(int value, int yellow, int orange, int red) {
   return AIR_GREEN;
 }
 
+// Return text label for air level.
 const char* levelName(AirLevel l) {
   if (l == AIR_GREEN) return "GREEN";
   if (l == AIR_YELLOW) return "YELLOW";
@@ -193,6 +208,7 @@ const char* levelName(AirLevel l) {
   return "RED";
 }
 
+// Update moving-average filter for flame analog signal.
 void updateFlameFilter(int raw) {
   if (!flamePrimed) {
     for (uint8_t i = 0; i < FLAME_FILTER_N; i++) flameBuf[i] = raw;
@@ -208,6 +224,7 @@ void updateFlameFilter(int raw) {
   sensor.flameAvg = (int)(flameSum / FLAME_FILTER_N);
 }
 
+// Latch/unlatch flame fire detection with hysteresis.
 void updateFlameDetection() {
   // KY-026 analog typically decreases when flame IR increases.
   if (!sensor.flameDetected && sensor.flameAvg <= cfg.flameTrigger) {
@@ -218,13 +235,14 @@ void updateFlameDetection() {
   }
 }
 
+// Increment software clock from millis().
 void tickClock(unsigned long now) {
   if (now - lastTraceTickClock >= 2000UL) {
     lastTraceTickClock = now;
     Serial.println(F("[TASK] tickClock"));
   }
 
-  while (now - lastClockTick >= 1000UL) {
+  while (now - lastClockTick >= 1000UL) { // Catch up if loop was delayed.
     lastClockTick += 1000UL;
     clockData.ss++;
     if (clockData.ss >= 60) {
@@ -238,6 +256,7 @@ void tickClock(unsigned long now) {
   }
 }
 
+// Adjust selected clock field (HH/MM/SS) with wraparound.
 void adjustClockField(int delta) {
   if (clockData.field == 0) {
     int hh = (int)clockData.hh + delta;
@@ -257,6 +276,7 @@ void adjustClockField(int delta) {
   }
 }
 
+// Periodically sample sensors and input devices.
 void readSensorsTask(unsigned long now) {
   if (now - lastTraceRead >= 2000UL) {
     lastTraceRead = now;
@@ -291,13 +311,14 @@ void readSensorsTask(unsigned long now) {
   }
 }
 
+// Process joystick button and axis events for menu navigation/editing.
 void handleInputTask(unsigned long now) {
   if (now - lastTraceInput >= 2000UL) {
     lastTraceInput = now;
     Serial.println(F("[TASK] handleInputTask"));
   }
 
-  bool btnEvent = joyPressed && !prevJoyPressed;
+  bool btnEvent = joyPressed && !prevJoyPressed; // Rising edge detect.
   prevJoyPressed = joyPressed;
 
   if (btnEvent) {
@@ -329,7 +350,7 @@ void handleInputTask(unsigned long now) {
   }
 
   if (!menuActive) return;
-  if (now - lastInputTick < JOY_REPEAT_MS) return;
+  if (now - lastInputTick < JOY_REPEAT_MS) return; // Debounce + repeat rate.
 
   if (!clockData.editMode && joyY > JOY_HIGH) {
     lastInputTick = now;
@@ -365,6 +386,7 @@ void handleInputTask(unsigned long now) {
   }
 }
 
+// Derive system state and dominant alert level from sensor values.
 void updateStateTask(unsigned long now) {
   if (now - lastTraceState >= 2000UL) {
     lastTraceState = now;
@@ -379,12 +401,12 @@ void updateStateTask(unsigned long now) {
 
   airLevel = mqLevel;
   outlierValue = sensor.mqRaw;
-  if ((int)flameLevel > (int)airLevel) {
+  if ((int)flameLevel > (int)airLevel) { // Use the worst (highest severity).
     airLevel = flameLevel;
     outlierValue = sensor.flameAvg;
   }
 
-  if (sensor.flameDetected) {
+  if (sensor.flameDetected) { // Fire state overrides all normal warnings.
     systemState = FIRE_ALERT;
   } else if (menuActive) {
     systemState = MENU;
@@ -397,6 +419,7 @@ void updateStateTask(unsigned long now) {
   }
 }
 
+// Apply LED color/blink pattern based on state and severity.
 void applyLedPattern(unsigned long now) {
   uint16_t period = 0;
   if (systemState == ALERT_ORANGE) period = 500;
@@ -410,7 +433,7 @@ void applyLedPattern(unsigned long now) {
     blinkOn = true;
   }
 
-  if (!blinkOn && period > 0) {
+  if (!blinkOn && period > 0) { // Blink-off phase.
     setColor(0, 0, 0);
     return;
   }
@@ -425,11 +448,12 @@ void applyLedPattern(unsigned long now) {
   if (airLevel == AIR_RED) setColor(255, 0, 0);
 }
 
+// Apply buzzer cadence/tone pattern for warning and fire states.
 void applyBuzzerPattern(unsigned long now) {
   static unsigned long lastTone = 0;
   static bool fireFlip = false;
 
-  if (systemState == FIRE_ALERT) {
+  if (systemState == FIRE_ALERT) { // Fast alternating alarm for fire.
     if (now - lastTone >= 180) {
       lastTone = now;
       fireFlip = !fireFlip;
@@ -437,14 +461,14 @@ void applyBuzzerPattern(unsigned long now) {
     }
     return;
   }
-  if (systemState == ALERT_RED) {
+  if (systemState == ALERT_RED) { // Strong periodic warning.
     if (now - lastTone >= 500) {
       lastTone = now;
       tone(BUZZER_PIN, 1300, 220);
     }
     return;
   }
-  if (systemState == ALERT_ORANGE) {
+  if (systemState == ALERT_ORANGE) { // Softer periodic warning.
     if (now - lastTone >= 900) {
       lastTone = now;
       tone(BUZZER_PIN, 900, 150);
@@ -454,6 +478,7 @@ void applyBuzzerPattern(unsigned long now) {
   noTone(BUZZER_PIN);
 }
 
+// Apply automatic fan duty from current severity/state.
 void applyFanControl() {
   if (systemState == FIRE_ALERT) {
     setFanDuty(100);
@@ -462,6 +487,7 @@ void applyFanControl() {
   setFanDuty(cfg.fanDutyByLevel[(int)airLevel]);
 }
 
+// Periodic output task for LED, buzzer, and fan.
 void updateOutputTask(unsigned long now) {
   if (now - lastTraceOutput >= 2000UL) {
     lastTraceOutput = now;
@@ -475,6 +501,7 @@ void updateOutputTask(unsigned long now) {
   applyFanControl();
 }
 
+// Render idle clock/home page.
 void renderIdleClock() {
   char l0[21], l1[21], l2[21], l3[21];
   formatLcdLine(l0, "Clock %02u:%02u:%02u", clockData.hh, clockData.mm, clockData.ss);
@@ -484,6 +511,7 @@ void renderIdleClock() {
   renderLines(l0, l1, l2, l3);
 }
 
+// Render hazardous gas page.
 void renderGasPage() {
   char l0[21], l1[21], l2[21], l3[21];
   formatLcdLine(l0, "Gas Sensor MQ-135");
@@ -493,6 +521,7 @@ void renderGasPage() {
   renderLines(l0, l1, l2, l3);
 }
 
+// Render temperature and humidity page.
 void renderTempPage() {
   char l0[21], l1[21], l2[21], l3[21];
   formatLcdLine(l0, "Temperature/Humidity");
@@ -525,6 +554,7 @@ void renderTempPage() {
   renderLines(l0, l1, l2, l3);
 }
 
+// Render flame status page and thresholds.
 void renderFlamePage() {
   char l0[21], l1[21], l2[21], l3[21];
   formatLcdLine(l0, "Flame Sensor KY-026");
@@ -534,6 +564,7 @@ void renderFlamePage() {
   renderLines(l0, l1, l2, l3);
 }
 
+// Render fan configuration/active duty page.
 void renderFanPage() {
   char l0[21], l1[21], l2[21], l3[21];
   formatLcdLine(l0, "Fan Config by Level");
@@ -543,6 +574,7 @@ void renderFanPage() {
   renderLines(l0, l1, l2, l3);
 }
 
+// Render clock setup page.
 void renderClockPage() {
   char l0[21], l1[21], l2[21], l3[21];
   formatLcdLine(l0, "Clock Setup");
@@ -557,6 +589,7 @@ void renderClockPage() {
   renderLines(l0, l1, l2, l3);
 }
 
+// Render orange/red warning summary page.
 void renderAlertScreen() {
   char l0[21], l1[21], l2[21], l3[21];
   formatLcdLine(l0, "Air Warning Active");
@@ -566,6 +599,7 @@ void renderAlertScreen() {
   renderLines(l0, l1, l2, l3);
 }
 
+// Render fire-priority alert page.
 void renderFireScreen() {
   char l0[21], l1[21], l2[21], l3[21];
   formatLcdLine(l0, "!!! FIRE ALERT !!!");
@@ -575,13 +609,14 @@ void renderFireScreen() {
   renderLines(l0, l1, l2, l3);
 }
 
+// Periodic UI task that selects and renders the active screen.
 void updateUiTask(unsigned long now) {
   if (now - lastTraceUi >= 2000UL) {
     lastTraceUi = now;
     Serial.println(F("[TASK] updateUiTask"));
   }
 
-  if (now - lastUiTick < UI_MS) return;
+  if (now - lastUiTick < UI_MS) return; // UI frame limiter.
   lastUiTick = now;
 
   if (!menuActive && systemState == FIRE_ALERT) {
@@ -604,6 +639,7 @@ void updateUiTask(unsigned long now) {
   if (uiPage == PAGE_CLOCK) renderClockPage();
 }
 
+// Initialize peripherals, sensors, and initial UI.
 void setup() {
   Serial.begin(9600);
   Serial.println(F("[BOOT] setup"));
@@ -639,6 +675,7 @@ void setup() {
   lcd.clear();
 }
 
+// Main cooperative loop scheduler.
 void loop() {
   unsigned long now = millis();
   tickClock(now);

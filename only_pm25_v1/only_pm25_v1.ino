@@ -1,5 +1,10 @@
 /* Test sketch for Adafruit PM2.5 sensor with UART or I2C */
 
+// Operating principle:
+// 1) Read PMS5003 data over SoftwareSerial via Adafruit PM25 library.
+// 2) Print full diagnostics to Serial each successful read.
+// 3) Show real-time PM1.0/PM2.5/PM10 values on the 20x4 LCD.
+
 #include "Adafruit_PM25AQI.h"
 // pin #2 is IN from sensor (TX pin on sensor), leave pin #3 disconnected
 #include <SoftwareSerial.h>
@@ -10,6 +15,7 @@ SoftwareSerial pmSerial(2, 3);
 Adafruit_PM25AQI aqi = Adafruit_PM25AQI();
 LiquidCrystal_I2C lcd(0x27, 20, 4);
 
+// Initialize serial, LCD, and PMS5003 UART interface.
 void setup() {
   Serial.begin(9600);
   Serial.println("Adafruit PMSA003I Air Quality Sensor");
@@ -40,6 +46,7 @@ void setup() {
   lcd.print("PM25 Ready");
 }
 
+// Read PM frame, keep Serial diagnostics, and update LCD values.
 void loop() {
   PM25_AQI_Data data;
   
